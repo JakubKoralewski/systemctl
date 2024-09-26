@@ -26,6 +26,13 @@ pub struct SystemCtl {
     path: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct RunResult {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_status: std::process::ExitStatus,
+}
+
 impl SystemCtl {
     /// Invokes `systemctl $args`
     fn spawn_child<'a, 's: 'a, S: IntoIterator<Item = &'a str>>(
@@ -35,7 +42,7 @@ impl SystemCtl {
         std::process::Command::new(self.get_path())
             .args(self.additional_args.iter().map(String::as_str).chain(args))
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
             .spawn()
     }
 
@@ -55,9 +62,10 @@ impl SystemCtl {
     fn systemctl_capture<'a, 's: 'a, S: IntoIterator<Item = &'a str>>(
         &'s self,
         args: S,
-    ) -> std::io::Result<String> {
+    ) -> std::io::Result<RunResult> {
         let mut child = self.spawn_child(args)?;
-        match child.wait()?.code() {
+        let exit_status = child.wait()?;
+        match exit_status.code() {
             Some(0) => {}, // success
             Some(1) => {}, // success -> Ok(Unit not found)
             Some(3) => {}, // success -> Ok(unit is inactive and/or dead)
@@ -83,99 +91,96 @@ impl SystemCtl {
             },
         }
 
-        let mut stdout: Vec<u8> = Vec::new();
-        let size = child.stdout.unwrap().read_to_end(&mut stdout)?;
+        let mut stdout = String::new();
+        child.stdout.unwrap().read_to_string(&mut stdout).unwrap();
 
-        if size > 0 {
-            if let Ok(s) = String::from_utf8(stdout) {
-                return Ok(s);
-            } else {
-                return Err(Error::new(
-                    ErrorKind::InvalidData,
-                    "Invalid utf8 data in stdout",
-                ));
-            }
-        }
+        let mut stderr = String::new();
+        child.stderr.unwrap().read_to_string(&mut stderr).unwrap();
 
-        // if this is reached all if's above did not work
-        Err(Error::new(
-            ErrorKind::UnexpectedEof,
-            "systemctl stdout empty",
-        ))
+        Ok(RunResult {
+            stdout,
+            stderr,
+            exit_status,
+        })
     }
 
     /// Reloads all unit files
-    pub fn daemon_reload(&self) -> std::io::Result<ExitStatus> {
-        self.systemctl(["daemon-reload"])
+    pub fn daemon_reload(&self) -> std::io::Result<RunResult> {
+        self.systemctl_capture(["daemon-reload"])
     }
 
     /// Forces given `unit` to (re)start
-    pub fn restart(&self, unit: &str) -> std::io::Result<ExitStatus> {
-        self.systemctl(["restart", unit])
+    pub fn restart(&self, unit: &str) -> std::io::Result<RunResult> {
+        self.systemctl_capture(["restart", unit])
     }
 
     /// Forces given `unit` to start
-    pub fn start(&self, unit: &str) -> std::io::Result<ExitStatus> {
-        self.systemctl(["start", unit])
+    pub fn start(&self, unit: &str) -> std::io::Result<RunResult> {
+        self.systemctl_capture(["start", unit])
     }
 
     /// Forces given `unit` to stop
-    pub fn stop(&self, unit: &str) -> std::io::Result<ExitStatus> {
-        self.systemctl(["stop", unit])
+    pub fn stop(&self, unit: &str) -> std::io::Result<RunResult> {
+        self.systemctl_capture(["stop", unit])
+    }
+
+    /// Forces given `unit` to stop
+    pub fn clean(&self, unit: &str) -> std::io::Result<RunResult> {
+        self.systemctl_capture(["clean", unit])
     }
 
     /// Triggers reload for given `unit`
-    pub fn reload(&self, unit: &str) -> std::io::Result<ExitStatus> {
-        self.systemctl(["reload", unit])
+    pub fn reload(&self, unit: &str) -> std::io::Result<RunResult> {
+        self.systemctl_capture(["reload", unit])
     }
 
     /// Triggers reload or restarts given `unit`
-    pub fn reload_or_restart(&self, unit: &str) -> std::io::Result<ExitStatus> {
-        self.systemctl(["reload-or-restart", unit])
+    pub fn reload_or_restart(&self, unit: &str) -> std::io::Result<RunResult> {
+        self.systemctl_capture(["reload-or-restart", unit])
     }
 
     /// Enable given `unit` to start at boot
-    pub fn enable(&self, unit: &str) -> std::io::Result<ExitStatus> {
-        self.systemctl(["enable", unit])
+    pub fn enable(&self, unit: &str) -> std::io::Result<RunResult> {
+        self.systemctl_capture(["enable", unit])
     }
 
     /// Disable given `unit` to start at boot
-    pub fn disable(&self, unit: &str) -> std::io::Result<ExitStatus> {
-        self.systemctl(["disable", unit])
+    pub fn disable(&self, unit: &str) -> std::io::Result<RunResult> {
+        self.systemctl_capture(["disable", unit])
     }
 
     /// Returns raw status from `systemctl status $unit` call
-    pub fn status(&self, unit: &str) -> std::io::Result<String> {
+    pub fn status(&self, unit: &str) -> std::io::Result<RunResult> {
         self.systemctl_capture(["status", unit])
     }
 
     /// Invokes systemctl `cat` on given `unit`
-    pub fn cat(&self, unit: &str) -> std::io::Result<String> {
+    pub fn cat(&self, unit: &str) -> std::io::Result<RunResult> {
         self.systemctl_capture(["cat", unit])
     }
 
     /// Returns `true` if given `unit` is actively running
     pub fn is_active(&self, unit: &str) -> std::io::Result<bool> {
         let status = self.systemctl_capture(["is-active", unit])?;
-        Ok(status.trim_end().eq("active"))
+        Ok(status.stdout.trim_end().eq("active"))
     }
 
     /// Isolates given unit, only self and its dependencies are
     /// now actively running
-    pub fn isolate(&self, unit: &str) -> std::io::Result<ExitStatus> {
-        self.systemctl(["isolate", unit])
+    pub fn isolate(&self, unit: &str) -> std::io::Result<RunResult> {
+        self.systemctl_capture(["isolate", unit])
     }
 
     /// Freezes (halts) given unit.
     /// This operation might not be feasible.
-    pub fn freeze(&self, unit: &str) -> std::io::Result<ExitStatus> {
-        self.systemctl(["freeze", unit])
+    pub fn freeze(&self, unit: &str) -> std::io::Result<RunResult> {
+        self.systemctl_capture(["freeze", unit])
     }
 
     /// Unfreezes given unit (recover from halted state).
     /// This operation might not be feasible.
-    pub fn unfreeze(&self, unit: &str) -> std::io::Result<ExitStatus> {
-        self.systemctl(["thaw", unit])
+    pub fn unfreeze(&self, unit: &str) -> std::io::Result<RunResult> {
+        self.systemctl_capture(["thaw", unit])
     }
 
     /// Returns `true` if given `unit` exists,
@@ -211,6 +216,7 @@ impl SystemCtl {
         let mut result: Vec<UnitList> = Vec::new();
         let content = self.systemctl_capture(args)?;
         let lines = content
+            .stdout
             .lines()
             .filter(|line| line.contains('.') && !line.ends_with('.'));
 
@@ -266,7 +272,7 @@ impl SystemCtl {
         }
         let mut u = Unit::default();
         let status = self.status(name)?;
-        let mut lines = status.lines();
+        let mut lines = status.stdout.lines();
         let next = lines.next().unwrap();
         let (_, rem) = next.split_at(3);
         let mut items = rem.split_ascii_whitespace();
@@ -369,6 +375,7 @@ impl SystemCtl {
 
         if let Ok(content) = self.cat(name) {
             let line_tuple = content
+                .stdout
                 .lines()
                 .filter_map(|line| line.split_once('=').to_owned());
             for (k, v) in line_tuple {
